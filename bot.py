@@ -2,7 +2,7 @@ import os, re, secrets, logging, sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
-from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as K, Update
+from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as K, Update, WebAppInfo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
 TOKEN=os.getenv('BOT_TOKEN','').strip(); DB_PATH=os.getenv('DB_PATH','bot_data.sqlite3')
@@ -28,7 +28,11 @@ def getuser(uid):
  with db() as c: r=c.execute('SELECT * FROM users WHERE user_id=?',(uid,)).fetchone()
  return dict(r) if r else {'user_id':uid,'username':'','balance':0,'total_deposit':0}
 def kb(rows): return K([[B(label,callback_data=cb) for label,cb in row] for row in rows])
-def main_kb(): return kb([[('👤 TÀI KHOẢN','account'),('🛍 CỬA HÀNG','shop')],[('💰 NẠP TIỀN','deposit'),('📊 LỊCH SỬ','history')],[('📥 TẢI FILE','files'),('💬 HỖ TRỢ','support')],[('🌟 MỞ MINI APP','miniapp')]])
+def main_kb():
+ rows=[[B('👤 TÀI KHOẢN',callback_data='account'),B('🛍 CỬA HÀNG',callback_data='shop')],[B('💰 NẠP TIỀN',callback_data='deposit'),B('📊 LỊCH SỬ',callback_data='history')],[B('📥 TẢI FILE',url='https://zalo.me/84338423525'),B('💬 HỖ TRỢ',callback_data='support')]]
+ web_url=os.getenv('WEBAPP_URL','').strip()
+ if web_url.startswith('https://'): rows.append([B('🌟 MỞ MINI APP',web_app=WebAppInfo(url=web_url))])
+ return K(rows)
 def back(target='home'): return kb([[('QUAY LẠI',target)]])
 def admin_kb(): return kb([[('📊 THỐNG KÊ BOT','admin_stats')],[('➕ CỘNG TIỀN USER','admin_add_start'),('➖ TRỪ TIỀN USER','admin_sub_start')],[('🔎 KIỂM TRA USER','admin_check')],[('🏠 MENU CHÍNH','home')]])
 def deposit_kb():
@@ -177,10 +181,13 @@ async def cb(update:Update,context:ContextTypes.DEFAULT_TYPE):
  elif d.startswith('admin_deposit_ok:'):
   code=d.split(':',1)[1]
   with db() as c:
+   c.execute('BEGIN IMMEDIATE')
    r=c.execute('SELECT * FROM deposits WHERE code=?',(code,)).fetchone()
    if not r: await q.answer('Không tìm thấy đơn.',show_alert=True); return
    if r['status']!='pending': await q.answer('Đơn đã xử lý.',show_alert=True); return
-   c.execute("UPDATE deposits SET status='confirmed',completed_at=? WHERE code=?",(now(),code)); c.execute('UPDATE users SET balance=balance+?,total_deposit=total_deposit+? WHERE user_id=?',(r['amount'],r['amount'],r['user_id'])); c.execute('INSERT INTO balance_logs(user_id,admin_id,amount,action,note,created_at) VALUES(?,?,?,?,?,?)',(r['user_id'],u.id,r['amount'],'deposit',code,now())); bal=c.execute('SELECT balance FROM users WHERE user_id=?',(r['user_id'],)).fetchone()['balance']
+   changed=c.execute("UPDATE deposits SET status='confirmed',completed_at=? WHERE code=? AND status='pending'",(now(),code)).rowcount
+   if changed != 1: await q.answer('Đơn đã được xử lý.',show_alert=True); return
+   c.execute('UPDATE users SET balance=balance+?,total_deposit=total_deposit+? WHERE user_id=?',(r['amount'],r['amount'],r['user_id'])); c.execute('INSERT INTO balance_logs(user_id,admin_id,amount,action,note,created_at) VALUES(?,?,?,?,?,?)',(r['user_id'],u.id,r['amount'],'deposit',code,now())); bal=c.execute('SELECT balance FROM users WHERE user_id=?',(r['user_id'],)).fetchone()['balance']
   await q.answer('Đã xác nhận.'); await q.edit_message_text(f'✅ Đã xác nhận {code}: {r["amount"]:,}đ cho user {r["user_id"]}.')
   try: await context.bot.send_message(r['user_id'],f'✅ Nạp tiền thành công: {r["amount"]:,}đ. Số dư mới: {bal:,}đ')
   except Exception: pass
