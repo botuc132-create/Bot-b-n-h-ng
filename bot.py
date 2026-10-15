@@ -1,4 +1,4 @@
-import os, re, secrets, logging, sqlite3
+import os, re, secrets, logging, sqlite3, threading
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
@@ -206,5 +206,8 @@ async def err(update,context): log.exception('Bot error',exc_info=context.error)
 def main():
  if not TOKEN: raise RuntimeError('Thiếu BOT_TOKEN trong Railway Variables.')
  with db(): pass
+ # Mini App web server and Telegram polling run in the same Railway process.
+ from webapp import run_web
+ threading.Thread(target=run_web, name='miniapp-web', daemon=True).start()
  app=Application.builder().token(TOKEN).build(); app.add_handler(CommandHandler('start',start)); app.add_handler(CommandHandler('nap',nap_cmd)); app.add_handler(CommandHandler('admin',admin_cmd)); app.add_handler(CallbackQueryHandler(cb)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,messages)); app.add_error_handler(err); app.run_polling(drop_pending_updates=True)
 if __name__=='__main__': main()
