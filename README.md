@@ -1,13 +1,22 @@
-# MinhOS Telegram Bot (Railway)
+# MinhOS Telegram Bot — VietQR fix
 
-## Chạy trên Railway
-1. Tải giải nén thư mục này, đưa các file lên GitHub repository.
-2. Trên Railway chọn **New Project → Deploy from GitHub Repo** và chọn repository.
-3. Vào **Variables** của service, thêm `BOT_TOKEN` = token bot lấy từ BotFather.
-4. Deploy. Railway sẽ chạy worker bằng `python bot.py`.
+## Railway Variables
+- `BOT_TOKEN`: Telegram bot token
+- `ADMIN_IDS`: admin Telegram numeric user ID(s), comma-separated (required for admin permissions)
+- `ADMIN_PASSWORD`: admin login password (change the default)
+- `BANK_ID`: default `ICB`
+- `BANK_ACCOUNT`: default `102886882160`
+- `BANK_ACCOUNT_NAME`: exact account holder name (recommended)
+- `ADMIN_CHAT_ID`: optional admin chat/user ID to receive deposit alerts if not already in `ADMIN_IDS`
+- `ADMIN_USERNAME`: optional support username
 
-## Lưu ý
-- Bot dùng Inline Keyboard cho tất cả menu, không dùng ReplyKeyboardMarkup.
-- Đây là bản giao diện mẫu. Giá/tồn kho đang là dữ liệu minh họa; các chức năng thanh toán, giao hàng, tải file và Mini App chưa được kết nối.
-- SQLite lưu trong filesystem của container. Để giữ dữ liệu qua lần deploy/restart, hãy gắn Railway Volume và đặt biến `DB_PATH` vào đường dẫn nằm trên volume, ví dụ `/data/bot_data.sqlite3`.
-- Không đưa BOT_TOKEN lên GitHub hoặc gửi công khai.
+## Commands
+- `/start`: main menu
+- `/nap 15000` or `/nap 15k`: create a deposit QR for the entered amount
+- `/admin`: prompts for the admin password; after login, shows the admin panel
+
+## Important
+This version creates a VietQR request and alerts admins. It does not verify bank transfers automatically. Confirm a transfer in the actual bank account before pressing the admin confirmation button. Automatic verification requires a bank transaction API/webhook.
+
+## Deploy
+Replace the project files in Railway with these files and redeploy. Check Railway Deploy Logs for startup errors. Make sure only one running deployment/process is polling the same bot token.
