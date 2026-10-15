@@ -135,8 +135,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user(user)
     text = (
         "Chào Mừng Đến Với Bot MinhOS - Store Hack Auto Bán Hàng Tự Động 24/7\n\n"
-        "📢 Kênh thông báo: @minhiosbanhacks1\n"
-        "🌨 Admin: @minhiosne\n"
+        "📢 Kênh thông báo: https://t.me/luxyffshare\n"
+        "🌨 Admin: @huybuwin\n"
         "━━━━━━━━━━━━━━\n"
         "📌 Tổng nạp: 0đ\n"
         "🏅 Tổng nạp tháng: 0đ\n"
@@ -208,13 +208,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "soldout":
         await show(q, "❌ Gói này hiện đã hết hàng.", back_keyboard("buy_account"))
     elif data == "deposit":
-        await show(q, "💰 NẠP TIỀN\n\nChức năng nạp tiền chưa được kết nối cổng thanh toán. Vui lòng liên hệ admin @minhiosne.", back_keyboard())
+        await show(q, "💰 NẠP TIỀN\n\nChức năng nạp tiền chưa được kết nối cổng thanh toán. Vui lòng liên hệ admin @huybuwin.", back_keyboard())
     elif data == "history":
         await show(q, "📊 LỊCH SỬ\n\nChưa có giao dịch nào.", back_keyboard())
     elif data == "files":
         await show(q, "📥 TẢI FILE\n\nChưa cấu hình file tải xuống. Vui lòng liên hệ admin.", back_keyboard())
     elif data == "support":
-        await show(q, "💬 HỖ TRỢ\n\nLiên hệ admin: @minhiosne", back_keyboard())
+        await show(q, "💬 HỖ TRỢ\n\nLiên hệ admin: @huybuwin", back_keyboard())
     elif data == "miniapp":
         await show(q, "🌟 MINI APP\n\nChưa cấu hình WEBAPP_URL. Khi có website, thêm nút Web App với URL HTTPS của bạn.", back_keyboard())
     else:
