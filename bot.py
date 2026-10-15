@@ -2,11 +2,11 @@ import os, re, secrets, logging, sqlite3, threading
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
-from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as K, Update, WebAppInfo
+from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as K, Update, WebAppInfo, MenuButtonWebApp
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
 TOKEN=os.getenv('BOT_TOKEN','').strip(); DB_PATH=os.getenv('DB_PATH','bot_data.sqlite3')
-ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD','huydz123')
+ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD','Huydz123')
 ADMIN_IDS={int(x.strip()) for x in os.getenv('ADMIN_IDS','').split(',') if x.strip().isdigit()}
 BANK_ID=os.getenv('BANK_ID','ICB').strip(); BANK_ACCOUNT=os.getenv('BANK_ACCOUNT','102886882160').strip(); BANK_ACCOUNT_NAME=os.getenv('BANK_ACCOUNT_NAME','').strip()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s'); log=logging.getLogger('bot')
@@ -34,7 +34,12 @@ def main_kb():
  if web_url.startswith('https://'): rows.append([B('🌟 MỞ MINI APP',web_app=WebAppInfo(url=web_url))])
  return K(rows)
 def back(target='home'): return kb([[('QUAY LẠI',target)]])
-def admin_kb(): return kb([[('📊 THỐNG KÊ BOT','admin_stats')],[('➕ CỘNG TIỀN USER','admin_add_start'),('➖ TRỪ TIỀN USER','admin_sub_start')],[('🔎 KIỂM TRA USER','admin_check')],[('🏠 MENU CHÍNH','home')]])
+def admin_kb():
+ rows=[[('📊 THỐNG KÊ BOT','admin_stats')],[('➕ CỘNG TIỀN USER','admin_add_start'),('➖ TRỪ TIỀN USER','admin_sub_start')],[('🔎 KIỂM TRA USER','admin_check')]]
+ url=os.getenv('WEBAPP_URL','').strip()
+ if url.startswith('https://'):
+  return K([[B('📦 QUẢN LÝ SẢN PHẨM / KEY',web_app=WebAppInfo(url=url))]]+[[B(label,callback_data=cb) for label,cb in row] for row in rows]+[[B('🏠 MENU CHÍNH',callback_data='home')]])
+ return kb(rows+[[('🏠 MENU CHÍNH','home')]])
 def deposit_kb():
  amounts=[(10000,'10.000Đ'),(20000,'20.000Đ'),(50000,'50.000Đ'),(100000,'100.000Đ'),(200000,'200.000Đ'),(500000,'500.000Đ')]
  rows=[]
@@ -94,7 +99,7 @@ async def nap_cmd(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
  u=update.effective_user; ensure(u); bal=getuser(u.id)['balance']
- await update.message.reply_text('Chào Mừng Đến Với Bot MinhOS - Store Hack Auto Bán Hàng Tự Động 24/7\n\n📢 Kênh thông báo: @minhiosbanhacks1\n🌨 Admin: @minhiosne\n━━━━━━━━━━━━━━\n📌 Tổng nạp: 0đ\n🏅 Tổng nạp tháng: 0đ\n🏦 Số dư: {:,}đ\n\nVui lòng chọn chức năng bên dưới.'.format(bal),reply_markup=main_kb())
+ await update.message.reply_text('Chào Mừng Đến Với Bot MinhOS - Store Hack Auto Bán Hàng Tự Động 24/7\n\n📢 Kênh thông báo: @luxyffshare\n🌨 Admin: @huybuwin\n━━━━━━━━━━━━━━\n📌 Tổng nạp: 0đ\n🏅 Tổng nạp tháng: 0đ\n🏦 Số dư: {:,}đ\n\nVui lòng chọn chức năng bên dưới.'.format(bal),reply_markup=main_kb())
 async def admin_cmd(update,context):
  if ADMIN_IDS and update.effective_user.id not in ADMIN_IDS:
   await update.message.reply_text('⛔ Bạn không có quyền admin. Hãy kiểm tra ADMIN_IDS trên Railway: nhập Telegram ID dạng số, không phải username.'); return
@@ -148,16 +153,44 @@ async def cb(update:Update,context:ContextTypes.DEFAULT_TYPE):
   x=getuser(u.id); await show(q,f'👤 THÔNG TIN CÁ NHÂN\n\n🆔 UID: {u.id}\n🍊 Username: @{x["username"] or "chưa_có_username"}\n💰 Số dư: {x["balance"]:,}đ\n🌐 Ngôn ngữ: TIẾNG VIỆT 🇻🇳',back())
  elif d=='shop': await show(q,'🛍 CỬA HÀNG\n\nChọn mục bạn muốn mua:',kb([[('🔑 MUA KEY','buy_key')],[('🛍 MUA TÀI KHOẢN','buy_account')],[('QUAY LẠI','home')]]))
  elif d in ('buy_account','buy_key'):
-  rows=[[(p['name'],'app:'+key)] for key,p in PRODUCTS.items()]+[[('QUAY LẠI','shop')]]; await show(q,('📱 CHỌN ỨNG DỤNG' if d=='buy_account' else '🔑 CHỌN LOẠI KEY')+'\n\nChọn sản phẩm bạn muốn mua:',kb(rows))
+  try:
+   with db() as c:
+    c.execute("CREATE TABLE IF NOT EXISTS catalog_products(id TEXT PRIMARY KEY,kind TEXT NOT NULL DEFAULT 'key',name TEXT NOT NULL,image TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)")
+    catalog=c.execute("SELECT id,name,kind FROM catalog_products WHERE active=1 ORDER BY rowid").fetchall()
+   rows=[[(r['name'],'app:'+r['id'])] for r in catalog if (d=='buy_account' or r['kind']!='account')]
+  except Exception: rows=[[(p['name'],'app:'+key)] for key,p in PRODUCTS.items()]
+  rows += [[('QUAY LẠI','shop')]]
+  await show(q,('📱 CHỌN ỨNG DỤNG' if d=='buy_account' else '🔑 CHỌN LOẠI KEY')+'\n\nChọn sản phẩm bạn muốn mua:',kb(rows))
  elif d.startswith('app:'):
-  key=d.split(':',1)[1]; p=PRODUCTS.get(key)
-  if not p: await show(q,'Không tìm thấy sản phẩm.',back('buy_account')); return
-  rows=[[(label, f'plan:{key}:{i}' if stock else 'soldout')] for i,(label,price,stock) in enumerate(p['plans'])]+[[('QUAY LẠI','buy_account')]]; await show(q,p['name']+'\n\nChọn gói bạn muốn mua:',kb(rows))
+  key=d.split(':',1)[1]
+  try:
+   with db() as c:
+    c.execute("CREATE TABLE IF NOT EXISTS catalog_products(id TEXT PRIMARY KEY,kind TEXT NOT NULL DEFAULT 'key',name TEXT NOT NULL,image TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS catalog_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,label TEXT NOT NULL,price INTEGER NOT NULL DEFAULT 0,sort_order INTEGER NOT NULL DEFAULT 0)")
+    c.execute("CREATE TABLE IF NOT EXISTS inventory_keys(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,plan_id INTEGER NOT NULL,secret TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'available',buyer_id INTEGER,purchase_id INTEGER,created_at TEXT NOT NULL,sold_at TEXT,UNIQUE(plan_id,secret))")
+    prod=c.execute("SELECT * FROM catalog_products WHERE id=? AND active=1",(key,)).fetchone()
+    plans=c.execute("SELECT pl.id,pl.label,pl.price,(SELECT COUNT(*) FROM inventory_keys k WHERE k.plan_id=pl.id AND k.status='available') stock FROM catalog_plans pl WHERE pl.product_id=? ORDER BY pl.sort_order,pl.id",(key,)).fetchall()
+   if not prod: await show(q,'Không tìm thấy sản phẩm.',back('buy_account')); return
+   rows=[[(f'{pl["label"]} — {pl["price"]:,}đ · Kho {pl["stock"]}',f'plan:{key}:{pl["id"]}' if pl["stock"] else 'soldout')] for pl in plans]+[[('QUAY LẠI','buy_account')]]
+   await show(q,prod['name']+'\n\nChọn gói bạn muốn mua:',kb(rows))
+  except Exception as e: log.exception('catalog error'); await show(q,'Lỗi tải danh mục. Hãy thử lại.',back('buy_account'))
  elif d.startswith('plan:'):
-  _,key,i=d.split(':'); label,price,stock=PRODUCTS[key]['plans'][int(i)]
-  if not stock: await show(q,'❌ Gói này hiện đã hết hàng.',back('app:'+key)); return
-  with db() as c: c.execute('INSERT INTO purchases(user_id,product,plan,amount,status,created_at) VALUES(?,?,?,?,?,?)',(u.id,PRODUCTS[key]['name'],label,price,'pending',now()))
-  await show(q,f'🛒 YÊU CẦU MUA ĐÃ GHI NHẬN\n\n{PRODUCTS[key]["name"]}\n{label}\nGiá: {price:,}đ\n\nBản mẫu chưa kết nối thanh toán/kho hàng tự giao.',kb([[('QUAY LẠI','app:'+key)],[('VỀ CỬA HÀNG','shop')]]))
+  _,key,plan_raw=d.split(':'); plan_id=int(plan_raw)
+  with db() as c:
+   c.execute("CREATE TABLE IF NOT EXISTS inventory_keys(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,plan_id INTEGER NOT NULL,secret TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'available',buyer_id INTEGER,purchase_id INTEGER,created_at TEXT NOT NULL,sold_at TEXT,UNIQUE(plan_id,secret))")
+   c.execute("CREATE TABLE IF NOT EXISTS catalog_products(id TEXT PRIMARY KEY,kind TEXT NOT NULL DEFAULT 'key',name TEXT NOT NULL,image TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)")
+   c.execute("CREATE TABLE IF NOT EXISTS catalog_plans(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,label TEXT NOT NULL,price INTEGER NOT NULL DEFAULT 0,sort_order INTEGER NOT NULL DEFAULT 0)")
+   c.execute('BEGIN IMMEDIATE')
+   pl=c.execute("SELECT pl.*,pr.name FROM catalog_plans pl JOIN catalog_products pr ON pr.id=pl.product_id WHERE pl.id=? AND pl.product_id=? AND pr.active=1",(plan_id,key)).fetchone()
+   stock=c.execute("SELECT * FROM inventory_keys WHERE plan_id=? AND status='available' ORDER BY id LIMIT 1",(plan_id,)).fetchone() if pl else None
+   usr=c.execute("SELECT balance FROM users WHERE user_id=?",(u.id,)).fetchone()
+   if not pl or not stock: await show(q,'❌ Gói này đã hết key.',back('app:'+key)); return
+   if not usr or usr['balance']<pl['price']: await show(q,'❌ Số dư không đủ. Hãy nạp tiền trước.',back('app:'+key)); return
+   c.execute("UPDATE users SET balance=balance-? WHERE user_id=?",(pl['price'],u.id))
+   cur=c.execute("INSERT INTO purchases(user_id,product,plan,amount,status,created_at,delivered_key,plan_id) VALUES(?,?,?,?,?,?,?,?)",(u.id,pl['name'],pl['label'],pl['price'],'completed',now(),stock['secret'],plan_id))
+   c.execute("UPDATE inventory_keys SET status='sold',buyer_id=?,purchase_id=?,sold_at=? WHERE id=? AND status='available'",(u.id,cur.lastrowid,now(),stock['id']))
+   c.execute("INSERT INTO balance_logs(user_id,admin_id,amount,action,note,created_at) VALUES(?,?,?,?,?,?)",(u.id,0,pl['price'],'purchase',pl['name']+' / '+pl['label'],now()))
+  await show(q,f'✅ MUA THÀNH CÔNG\n\n{pl["name"]}\n{pl["label"]}\nGiá: {pl["price"]:,}đ\n\n🔑 Key của bạn:\n{stock["secret"]}',kb([[('QUAY LẠI','app:'+key)],[('VỀ CỬA HÀNG','shop')]]))
  elif d=='soldout': await show(q,'❌ Gói này hiện đã hết hàng.',back('buy_account'))
  elif d=='deposit': await show(q,'💰 NẠP TIỀN TỰ ĐỘNG\n\nChọn số tiền muốn nạp (tối thiểu 10.000đ).\nChuyển khoản xong hệ thống chỉ tự cộng khi đã tích hợp API/webhook xác minh giao dịch.',deposit_kb())
  elif d.startswith('amount:'): await q.answer(); await create_deposit(context,q.message.chat_id,u,int(d.split(':')[1]))
@@ -166,7 +199,7 @@ async def cb(update:Update,context:ContextTypes.DEFAULT_TYPE):
   with db() as c: ds=c.execute('SELECT amount,status FROM deposits WHERE user_id=? ORDER BY id DESC LIMIT 5',(u.id,)).fetchall(); ps=c.execute('SELECT product,amount,status FROM purchases WHERE user_id=? ORDER BY id DESC LIMIT 5',(u.id,)).fetchall()
   lines=['📊 LỊCH SỬ CỦA BẠN','','💰 Nạp tiền:']+[f'• {r["amount"]:,}đ — {r["status"]}' for r in ds]+['','🛍 Mua hàng:']+[f'• {r["product"]} — {r["amount"]:,}đ — {r["status"]}' for r in ps]; await show(q,'\n'.join(lines),back())
  elif d=='files': await show(q,'📥 TẢI FILE\n\nChưa cấu hình file tải xuống.',back())
- elif d=='support': await show(q,'💬 HỖ TRỢ\n\nLiên hệ admin: @'+os.getenv('ADMIN_USERNAME','minhiosne').lstrip('@'),back())
+ elif d=='support': await show(q,'💬 HỖ TRỢ\n\nLiên hệ admin: @'+os.getenv('ADMIN_USERNAME','huybuwin').lstrip('@'),back())
  elif d=='miniapp': await show(q,'🌟 MINI APP\n\nChưa cấu hình WEBAPP_URL.',back())
  elif d=='admin_home': await show(q,'🛠 MENU ADMIN',admin_kb())
  elif d=='admin_stats':
@@ -203,11 +236,16 @@ async def cb(update:Update,context:ContextTypes.DEFAULT_TYPE):
   except Exception: pass
  else: await show(q,'Chức năng chưa được cấu hình.',back())
 async def err(update,context): log.exception('Bot error',exc_info=context.error)
+async def setup_menu_button(application):
+ url=os.getenv('WEBAPP_URL','').strip()
+ if url.startswith('https://'):
+  try: await application.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text='Mở Mini App',url=url))
+  except Exception as e: log.warning('Could not set Mini App menu button: %s',e)
 def main():
  if not TOKEN: raise RuntimeError('Thiếu BOT_TOKEN trong Railway Variables.')
  with db(): pass
  # Mini App web server and Telegram polling run in the same Railway process.
  from webapp import run_web
  threading.Thread(target=run_web, name='miniapp-web', daemon=True).start()
- app=Application.builder().token(TOKEN).build(); app.add_handler(CommandHandler('start',start)); app.add_handler(CommandHandler('nap',nap_cmd)); app.add_handler(CommandHandler('admin',admin_cmd)); app.add_handler(CallbackQueryHandler(cb)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,messages)); app.add_error_handler(err); app.run_polling(drop_pending_updates=True)
+ app=Application.builder().token(TOKEN).post_init(setup_menu_button).build(); app.add_handler(CommandHandler('start',start)); app.add_handler(CommandHandler('nap',nap_cmd)); app.add_handler(CommandHandler('admin',admin_cmd)); app.add_handler(CallbackQueryHandler(cb)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,messages)); app.add_error_handler(err); app.run_polling(drop_pending_updates=True)
 if __name__=='__main__': main()
