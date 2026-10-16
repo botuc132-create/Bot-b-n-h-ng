@@ -9,6 +9,8 @@ def connect():
     c=sqlite3.connect(DB_PATH, timeout=20)
     c.row_factory=sqlite3.Row
     c.execute("PRAGMA busy_timeout=20000")
+    c.execute("CREATE TABLE IF NOT EXISTS store_products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, price INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS product_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, secret_key TEXT NOT NULL, duration_value INTEGER NOT NULL DEFAULT 1, duration_unit TEXT NOT NULL DEFAULT 'day', status TEXT NOT NULL DEFAULT 'available', sold_to INTEGER, sold_at TEXT, UNIQUE(product_id,secret_key))")
     return c
 
 def telegram_user():
@@ -37,67 +39,6 @@ def auth_required():
         c.execute("INSERT INTO users(user_id,username,balance,total_deposit,created_at) VALUES(?,?,0,0,?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username",(u["id"],u["username"],now()))
     return u,None
 
-
-
-def ensure_catalog():
-    """Shared SQLite catalogue and one-time migration for the bot + Mini App."""
-    with connect() as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS catalog_products(
-            id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'key',
-            name TEXT NOT NULL, image TEXT NOT NULL DEFAULT '',
-            active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS catalog_plans(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT NOT NULL,
-            label TEXT NOT NULL, price INTEGER NOT NULL DEFAULT 0,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(product_id) REFERENCES catalog_products(id) ON DELETE CASCADE)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS inventory_keys(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT NOT NULL,
-            plan_id INTEGER NOT NULL, secret TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'available',
-            buyer_id INTEGER, purchase_id INTEGER, created_at TEXT NOT NULL, sold_at TEXT,
-            UNIQUE(plan_id,secret))""")
-        cols={r['name'] for r in c.execute("PRAGMA table_info(purchases)")}
-        if 'delivered_key' not in cols: c.execute("ALTER TABLE purchases ADD COLUMN delivered_key TEXT")
-        if 'plan_id' not in cols: c.execute("ALTER TABLE purchases ADD COLUMN plan_id INTEGER")
-        if not c.execute("SELECT 1 FROM catalog_products LIMIT 1").fetchone():
-            for key,p in PRODUCTS.items():
-                c.execute("INSERT OR IGNORE INTO catalog_products(id,kind,name,image,active,created_at) VALUES(?,?,?,?,1,?)",
-                          (key,'key',p['name'],'',now()))
-                for i,(label,price,stock) in enumerate(p['plans']):
-                    # Keep original labels/price; real stock comes from inventory keys.
-                    c.execute("INSERT INTO catalog_plans(product_id,label,price,sort_order) VALUES(?,?,?,?)",(key,label,price,i))
-        c.commit()
-
-def is_admin_user(uid):
-    return int(uid) in {int(x.strip()) for x in os.getenv("ADMIN_IDS","").split(",") if x.strip().isdigit()}
-
-def admin_required():
-    u, error = auth_required()
-    if error: return None, error
-    if not is_admin_user(u["id"]):
-        return None, (jsonify({"error":"Bạn không có quyền quản trị."}),403)
-    expected=os.getenv("ADMIN_PASSWORD","Huydz123")
-    supplied=request.headers.get("X-Admin-Password","")
-    if not expected or not hmac.compare_digest(supplied, expected):
-        return None, (jsonify({"error":"Mật khẩu admin không đúng hoặc chưa đăng nhập."}),401)
-    return u,None
-
-def catalog_rows():
-    ensure_catalog()
-    with connect() as c:
-        products=c.execute("SELECT * FROM catalog_products WHERE active=1 ORDER BY rowid").fetchall()
-        result=[]
-        for p in products:
-            plans=c.execute("""SELECT p.id,p.label,p.price,
-                (SELECT COUNT(*) FROM inventory_keys k WHERE k.plan_id=p.id AND k.status='available') stock
-                FROM catalog_plans p WHERE p.product_id=? ORDER BY p.sort_order,p.id""",(p['id'],)).fetchall()
-            result.append({"key":p['id'],"kind":p['kind'],"name":p['name'],"image":p['image'],
-                           "plans":[{"id":pl['id'],"index":i,"label":pl['label'],"price":pl['price'],
-                                     "stock":pl['stock'],"available":pl['stock']>0} for i,pl in enumerate(plans)]})
-        return result
-
-ensure_catalog()
-
 @app.get("/")
 def index(): return send_from_directory("static","index.html")
 
@@ -114,7 +55,21 @@ def me():
 def products():
     u,e=auth_required()
     if e:return e
-    return jsonify(catalog_rows())
+    out=[]
+    with connect() as c:
+        rows=c.execute("SELECT * FROM store_products ORDER BY id DESC").fetchall()
+        for p in rows:
+            keys=c.execute("SELECT duration_value,duration_unit,COUNT(*) stock FROM product_keys WHERE product_id=? AND status='available' GROUP BY duration_value,duration_unit ORDER BY duration_value",(p['id'],)).fetchall()
+            plans=[]
+            for i,k in enumerate(keys):
+                unit='ngày' if k['duration_unit']=='day' else 'giờ'
+                plans.append({'index':i,'duration_value':k['duration_value'],'duration_unit':k['duration_unit'],'label':f"{k['duration_value']} {unit}",'price':p['price'],'stock':k['stock'],'available':k['stock']>0})
+            out.append({'key':str(p['id']),'name':p['name'],'price':p['price'],'plans':plans})
+    # Keep legacy catalogue visible until the admin creates database products.
+    if not out:
+        for key,p in PRODUCTS.items():
+            out.append({'key':key,'name':p['name'],'plans':[{'index':i,'label':label,'price':price,'stock':stock,'available':bool(stock)} for i,(label,price,stock) in enumerate(p['plans'])]})
+    return jsonify(out)
 
 @app.get("/api/history")
 def history():
@@ -157,33 +112,36 @@ def create_deposit():
 def purchase():
     u,e=auth_required()
     if e:return e
-    ensure_catalog()
-    data=request.get_json(silent=True) or {}
-    product_id=str(data.get("product",""))
-    plan_id=data.get("plan_id")
-    if not isinstance(plan_id,int):
-        try: plan_id=int(plan_id)
-        except (TypeError,ValueError): return jsonify({"error":"Gói không hợp lệ"}),400
+    data=request.get_json(silent=True) or {}; key=str(data.get('product','')); idx=data.get('plan_index')
+    try: product_id=int(key); idx=int(idx)
+    except (ValueError,TypeError): return jsonify({'error':'Sản phẩm/gói không hợp lệ hoặc sản phẩm cũ chưa có kho key.'}),400
     with connect() as c:
-        c.execute("BEGIN IMMEDIATE")
-        plan=c.execute("""SELECT pl.*,pr.name product_name,pr.kind FROM catalog_plans pl
-                          JOIN catalog_products pr ON pr.id=pl.product_id
-                          WHERE pl.id=? AND pl.product_id=? AND pr.active=1""",(plan_id,product_id)).fetchone()
-        if not plan:return jsonify({"error":"Không tìm thấy sản phẩm/gói"}),404
-        key=c.execute("SELECT * FROM inventory_keys WHERE plan_id=? AND status='available' ORDER BY id LIMIT 1",(plan_id,)).fetchone()
-        if not key:return jsonify({"error":"Gói này đã hết key trong kho."}),409
-        user=c.execute("SELECT balance FROM users WHERE user_id=?",(u["id"],)).fetchone()
-        if not user or user["balance"]<plan["price"]:
-            return jsonify({"error":"Số dư không đủ. Vui lòng nạp tiền."}),402
-        c.execute("UPDATE users SET balance=balance-? WHERE user_id=?",(plan["price"],u["id"]))
-        cur=c.execute("INSERT INTO purchases(user_id,product,plan,amount,status,created_at,delivered_key,plan_id) VALUES(?,?,?,?,?,?,?,?)",
-            (u["id"],plan["product_name"],plan["label"],plan["price"],"completed",now(),key["secret"],plan_id))
-        c.execute("UPDATE inventory_keys SET status='sold',buyer_id=?,purchase_id=?,sold_at=? WHERE id=? AND status='available'",
-                  (u["id"],cur.lastrowid,now(),key["id"]))
-        c.execute("INSERT INTO balance_logs(user_id,admin_id,amount,action,note,created_at) VALUES(?,?,?,?,?,?)",
-                  (u["id"],0,plan["price"],"purchase",plan["product_name"]+" / "+plan["label"],now()))
-    return jsonify({"ok":True,"message":"Mua thành công. Key đã được cấp.","key":key["secret"],"product":plan["product_name"],"plan":plan["label"],"amount":plan["price"]}),201
+        c.execute('BEGIN IMMEDIATE')
+        product=c.execute('SELECT * FROM store_products WHERE id=?',(product_id,)).fetchone()
+        if not product:return jsonify({'error':'Không tìm thấy sản phẩm.'}),404
+        groups=c.execute("SELECT duration_value,duration_unit,COUNT(*) stock FROM product_keys WHERE product_id=? AND status='available' GROUP BY duration_value,duration_unit ORDER BY duration_value",(product_id,)).fetchall()
+        if idx<0 or idx>=len(groups):return jsonify({'error':'Gói không hợp lệ.'}),400
+        g=groups[idx]
+        user=c.execute('SELECT balance FROM users WHERE user_id=?',(u['id'],)).fetchone()
+        if not user or user['balance']<product['price']:return jsonify({'error':'Số dư không đủ.'}),400
+        keyrow=c.execute("SELECT id,secret_key FROM product_keys WHERE product_id=? AND status='available' AND duration_value=? AND duration_unit=? ORDER BY id LIMIT 1",(product_id,g['duration_value'],g['duration_unit'])).fetchone()
+        if not keyrow:return jsonify({'error':'Gói vừa hết hàng.'}),409
+        c.execute("UPDATE product_keys SET status='sold',sold_to=?,sold_at=? WHERE id=? AND status='available'",(u['id'],now(),keyrow['id']))
+        c.execute('UPDATE users SET balance=balance-? WHERE user_id=?',(product['price'],u['id']))
+        plan=f"{g['duration_value']} {'ngày' if g['duration_unit']=='day' else 'giờ'}"
+        c.execute("INSERT INTO purchases(user_id,product,plan,amount,status,created_at) VALUES(?,?,?,?,?,?)",(u['id'],product['name'],plan,product['price'],'completed',now()))
+        c.execute("INSERT INTO balance_logs(user_id,admin_id,amount,action,note,created_at) VALUES(?,?,?,?,?,?)",(u['id'],0,-product['price'],'purchase',product['name']+' / '+plan,now()))
+    return jsonify({'ok':True,'message':'Mua thành công','product':product['name'],'plan':plan,'key':keyrow['secret_key']})
 
+
+def admin_required():
+    u, error = auth_required()
+    if error:
+        return None, error
+    admins = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+    if u["id"] not in admins:
+        return None, (jsonify({"error": "Bạn không có quyền quản trị."}), 403)
+    return u, None
 
 @app.get("/api/admin")
 def admin_stats():
@@ -228,104 +186,75 @@ def admin_decide_deposit():
     return jsonify({"ok":True,"message":"Đã xác nhận và cộng tiền." if status == "confirmed" else "Đã từ chối yêu cầu nạp."})
 
 
+@app.get("/api/admin/products")
+def admin_products():
+    u,error=admin_required()
+    if error:return error
+    with connect() as c:
+        rows=[]
+        for p in c.execute('SELECT * FROM store_products ORDER BY id DESC').fetchall():
+            keys=c.execute("SELECT COUNT(*) total,SUM(CASE WHEN status='available' THEN 1 ELSE 0 END) available,SUM(CASE WHEN status='sold' THEN 1 ELSE 0 END) sold FROM product_keys WHERE product_id=?",(p['id'],)).fetchone()
+            durations=[dict(r) for r in c.execute("SELECT duration_value,duration_unit,COUNT(*) total,SUM(CASE WHEN status='available' THEN 1 ELSE 0 END) available FROM product_keys WHERE product_id=? GROUP BY duration_value,duration_unit ORDER BY duration_value",(p['id'],))]
+            rows.append({'id':p['id'],'name':p['name'],'price':p['price'],'total':keys['total'] or 0,'available':keys['available'] or 0,'sold':keys['sold'] or 0,'durations':durations})
+    return jsonify(rows)
+
 @app.post("/api/admin/products")
 def admin_add_product():
     u,error=admin_required()
     if error:return error
-    data=request.get_json(silent=True) or {}
-    name=str(data.get("name","")).strip()[:120]
-    kind=str(data.get("kind","key"))
-    image=str(data.get("image",""))
-    if not name:return jsonify({"error":"Vui lòng nhập tên sản phẩm."}),400
-    if kind not in ("key","certificate","account"):return jsonify({"error":"Loại sản phẩm không hợp lệ."}),400
-    if len(image)>1500000:return jsonify({"error":"Ảnh quá lớn, hãy chọn ảnh nhỏ hơn 1 MB."}),413
-    pid="p_"+secrets.token_hex(6)
-    with connect() as c:
-        c.execute("INSERT INTO catalog_products(id,kind,name,image,active,created_at) VALUES(?,?,?,?,1,?)",(pid,kind,name,image,now()))
-        label=str(data.get("plan_label","1 Key")).strip()[:80] or "1 Key"
-        try: price=max(0,int(data.get("price",0)))
-        except (TypeError,ValueError): return jsonify({"error":"Giá không hợp lệ."}),400
-        c.execute("INSERT INTO catalog_plans(product_id,label,price,sort_order) VALUES(?,?,?,0)",(pid,label,price))
-        plan_id=c.execute("SELECT last_insert_rowid()").fetchone()[0]
-        keys=data.get("keys",[])
-        if isinstance(keys,str): keys=keys.splitlines()
-        clean=list(dict.fromkeys(str(k).strip() for k in keys if str(k).strip()))
-        if len(clean)>5000:return jsonify({"error":"Tối đa 5000 key mỗi lần."}),400
-        for secret in clean:
-            c.execute("INSERT OR IGNORE INTO inventory_keys(product_id,plan_id,secret,status,created_at) VALUES(?,?,?,'available',?)",(pid,plan_id,secret,now()))
-    return jsonify({"ok":True,"message":f"Đã thêm sản phẩm và {len(clean)} key.","product_id":pid,"keys_added":len(clean)}),201
+    d=request.get_json(silent=True) or {}; name=str(d.get('name','')).strip()[:100]
+    try: price=int(d.get('price',0))
+    except (TypeError,ValueError): return jsonify({'error':'Giá không hợp lệ'}),400
+    if not name or price<0:return jsonify({'error':'Nhập tên sản phẩm và giá hợp lệ.'}),400
+    with connect() as c: cur=c.execute('INSERT INTO store_products(name,price,created_at) VALUES(?,?,?)',(name,price,now()))
+    return jsonify({'ok':True,'id':cur.lastrowid,'message':'Đã thêm sản phẩm. Tiếp theo hãy thêm key và thời hạn.'}),201
 
-@app.patch("/api/admin/products/<product_id>")
-def admin_edit_product(product_id):
+@app.post("/api/admin/products/<int:product_id>/keys")
+def admin_add_keys():
     u,error=admin_required()
     if error:return error
-    data=request.get_json(silent=True) or {}
+    d=request.get_json(silent=True) or {}; raw=str(d.get('keys','')); keys=[x.strip() for x in raw.splitlines() if x.strip()]
+    try: duration=int(d.get('duration_value',1)); unit=str(d.get('duration_unit','day'))
+    except (TypeError,ValueError): return jsonify({'error':'Thời hạn không hợp lệ'}),400
+    if not keys:return jsonify({'error':'Nhập ít nhất một key, mỗi dòng một key.'}),400
+    if duration<1 or duration>3650 or unit not in ('day','hour'):return jsonify({'error':'Thời hạn phải từ 1 đến 3650 ngày/giờ.'}),400
+    added=0
     with connect() as c:
-        p=c.execute("SELECT id FROM catalog_products WHERE id=?",(product_id,)).fetchone()
-        if not p:return jsonify({"error":"Không tìm thấy sản phẩm."}),404
-        if "name" in data:
-            name=str(data["name"]).strip()[:120]
-            if not name:return jsonify({"error":"Tên không được để trống."}),400
-            c.execute("UPDATE catalog_products SET name=? WHERE id=?",(name,product_id))
-        if "image" in data:
-            image=str(data["image"])
-            if len(image)>1500000:return jsonify({"error":"Ảnh quá lớn."}),413
-            c.execute("UPDATE catalog_products SET image=? WHERE id=?",(image,product_id))
-        if "active" in data:c.execute("UPDATE catalog_products SET active=? WHERE id=?",(1 if data["active"] else 0,product_id))
-        if "plan_id" in data:
-            try: price=max(0,int(data.get("price",0)))
-            except (TypeError,ValueError):return jsonify({"error":"Giá không hợp lệ."}),400
-            c.execute("UPDATE catalog_plans SET price=? WHERE id=? AND product_id=?",(price,int(data["plan_id"]),product_id))
-    return jsonify({"ok":True,"message":"Đã cập nhật."})
+        if not c.execute('SELECT id FROM store_products WHERE id=?',(product_id,)).fetchone():return jsonify({'error':'Không tìm thấy sản phẩm'}),404
+        for k in keys:
+            try:c.execute("INSERT INTO product_keys(product_id,secret_key,duration_value,duration_unit) VALUES(?,?,?,?)",(product_id,k[:500],duration,unit)); added+=1
+            except sqlite3.IntegrityError:pass
+    return jsonify({'ok':True,'added':added,'submitted':len(keys),'message':f'Đã thêm {added} key cho gói {duration} {"ngày" if unit=="day" else "giờ"}.'})
 
-@app.delete("/api/admin/products/<product_id>")
-def admin_delete_product(product_id):
+@app.patch("/api/admin/products/<int:product_id>")
+def admin_edit_product():
+    u,error=admin_required()
+    if error:return error
+    d=request.get_json(silent=True) or {}; name=str(d.get('name','')).strip()[:100]
+    try:price=int(d.get('price',0))
+    except (TypeError,ValueError):return jsonify({'error':'Giá không hợp lệ'}),400
+    if not name or price<0:return jsonify({'error':'Tên/giá không hợp lệ'}),400
+    with connect() as c:c.execute('UPDATE store_products SET name=?,price=? WHERE id=?',(name,price,product_id))
+    return jsonify({'ok':True,'message':'Đã cập nhật sản phẩm.'})
+
+@app.delete("/api/admin/products/<int:product_id>")
+def admin_delete_product():
     u,error=admin_required()
     if error:return error
     with connect() as c:
-        exists=c.execute("SELECT 1 FROM catalog_products WHERE id=?",(product_id,)).fetchone()
-        if not exists:return jsonify({"error":"Không tìm thấy sản phẩm."}),404
-        c.execute("UPDATE catalog_products SET active=0 WHERE id=?",(product_id,))
-    return jsonify({"ok":True,"message":"Đã ẩn/xóa sản phẩm khỏi cửa hàng."})
+        if c.execute("SELECT 1 FROM product_keys WHERE product_id=? AND status='sold' LIMIT 1",(product_id,)).fetchone():
+            return jsonify({'error':'Sản phẩm đã có giao dịch; không thể xóa hẳn để giữ lịch sử. Hãy sửa tên sản phẩm hoặc xóa các key còn hàng.'}),409
+        c.execute('DELETE FROM product_keys WHERE product_id=?',(product_id,)); cur=c.execute('DELETE FROM store_products WHERE id=?',(product_id,))
+        if not cur.rowcount:return jsonify({'error':'Không tìm thấy sản phẩm.'}),404
+    return jsonify({'ok':True,'message':'Đã xóa sản phẩm và key chưa bán.'})
 
-@app.post("/api/admin/products/<product_id>/keys")
-def admin_add_keys(product_id):
-    u,error=admin_required()
-    if error:return error
-    data=request.get_json(silent=True) or {}
-    keys=data.get("keys","")
-    if isinstance(keys,str):keys=keys.splitlines()
-    clean=list(dict.fromkeys(str(k).strip() for k in keys if str(k).strip()))
-    if not clean:return jsonify({"error":"Chưa nhập key nào."}),400
-    with connect() as c:
-        p=c.execute("SELECT id FROM catalog_products WHERE id=? AND active=1",(product_id,)).fetchone()
-        if not p:return jsonify({"error":"Không tìm thấy sản phẩm."}),404
-        plan_id=data.get("plan_id")
-        if plan_id:
-            plan=c.execute("SELECT id FROM catalog_plans WHERE id=? AND product_id=?",(int(plan_id),product_id)).fetchone()
-        else:plan=c.execute("SELECT id FROM catalog_plans WHERE product_id=? ORDER BY sort_order,id LIMIT 1",(product_id,)).fetchone()
-        if not plan:return jsonify({"error":"Sản phẩm chưa có gói."}),400
-        added=0
-        for secret in clean:
-            cur=c.execute("INSERT OR IGNORE INTO inventory_keys(product_id,plan_id,secret,status,created_at) VALUES(?,?,?,'available',?)",(product_id,plan["id"],secret,now()))
-            added+=cur.rowcount
-    return jsonify({"ok":True,"keys_added":added,"message":f"Đã thêm {added} key."})
-
-@app.get("/api/admin/buyer-history")
-def admin_buyer_history():
+@app.get("/api/admin/purchases")
+def admin_purchases():
     u,error=admin_required()
     if error:return error
     with connect() as c:
-        rows=[dict(r) for r in c.execute("""SELECT pu.id,pu.user_id,u.username,pu.product,pu.plan,pu.amount,pu.status,
-            pu.created_at,pu.delivered_key FROM purchases pu LEFT JOIN users u ON u.user_id=pu.user_id
-            ORDER BY pu.id DESC LIMIT 200""")]
+        rows=[dict(r) for r in c.execute("SELECT p.id,p.user_id,u.username,p.product,p.plan,p.amount,p.status,p.created_at FROM purchases p LEFT JOIN users u ON u.user_id=p.user_id ORDER BY p.id DESC LIMIT 200")]
     return jsonify(rows)
-
-@app.get("/api/admin/catalog")
-def admin_catalog():
-    u,error=admin_required()
-    if error:return error
-    return jsonify(catalog_rows())
 
 @app.get("/health")
 def health(): return jsonify({"ok":True})
