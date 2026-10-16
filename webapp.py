@@ -10,6 +10,10 @@ def connect():
     c.row_factory=sqlite3.Row
     c.execute("PRAGMA busy_timeout=20000")
     c.execute("CREATE TABLE IF NOT EXISTS store_products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, price INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)")
+    # Add image support safely to existing Railway SQLite databases.
+    cols={r[1] for r in c.execute("PRAGMA table_info(store_products)").fetchall()}
+    if "image_url" not in cols:
+        c.execute("ALTER TABLE store_products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''")
     c.execute("CREATE TABLE IF NOT EXISTS product_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, secret_key TEXT NOT NULL, duration_value INTEGER NOT NULL DEFAULT 1, duration_unit TEXT NOT NULL DEFAULT 'day', status TEXT NOT NULL DEFAULT 'available', sold_to INTEGER, sold_at TEXT, UNIQUE(product_id,secret_key))")
     return c
 
@@ -64,7 +68,7 @@ def products():
             for i,k in enumerate(keys):
                 unit='ngày' if k['duration_unit']=='day' else 'giờ'
                 plans.append({'index':i,'duration_value':k['duration_value'],'duration_unit':k['duration_unit'],'label':f"{k['duration_value']} {unit}",'price':p['price'],'stock':k['stock'],'available':k['stock']>0})
-            out.append({'key':str(p['id']),'name':p['name'],'price':p['price'],'plans':plans})
+            out.append({'key':str(p['id']),'name':p['name'],'image_url':p['image_url'] if 'image_url' in p.keys() else '', 'price':p['price'],'plans':plans})
     # Keep legacy catalogue visible until the admin creates database products.
     if not out:
         for key,p in PRODUCTS.items():
@@ -195,7 +199,7 @@ def admin_products():
         for p in c.execute('SELECT * FROM store_products ORDER BY id DESC').fetchall():
             keys=c.execute("SELECT COUNT(*) total,SUM(CASE WHEN status='available' THEN 1 ELSE 0 END) available,SUM(CASE WHEN status='sold' THEN 1 ELSE 0 END) sold FROM product_keys WHERE product_id=?",(p['id'],)).fetchone()
             durations=[dict(r) for r in c.execute("SELECT duration_value,duration_unit,COUNT(*) total,SUM(CASE WHEN status='available' THEN 1 ELSE 0 END) available FROM product_keys WHERE product_id=? GROUP BY duration_value,duration_unit ORDER BY duration_value",(p['id'],))]
-            rows.append({'id':p['id'],'name':p['name'],'price':p['price'],'total':keys['total'] or 0,'available':keys['available'] or 0,'sold':keys['sold'] or 0,'durations':durations})
+            rows.append({'id':p['id'],'name':p['name'],'image_url':p['image_url'] if 'image_url' in p.keys() else '', 'price':p['price'],'total':keys['total'] or 0,'available':keys['available'] or 0,'sold':keys['sold'] or 0,'durations':durations})
     return jsonify(rows)
 
 @app.post("/api/admin/products")
@@ -203,14 +207,17 @@ def admin_add_product():
     u,error=admin_required()
     if error:return error
     d=request.get_json(silent=True) or {}; name=str(d.get('name','')).strip()[:100]
-    try: price=int(d.get('price',0))
-    except (TypeError,ValueError): return jsonify({'error':'Giá không hợp lệ'}),400
-    if not name or price<0:return jsonify({'error':'Nhập tên sản phẩm và giá hợp lệ.'}),400
-    with connect() as c: cur=c.execute('INSERT INTO store_products(name,price,created_at) VALUES(?,?,?)',(name,price,now()))
-    return jsonify({'ok':True,'id':cur.lastrowid,'message':'Đã thêm sản phẩm. Tiếp theo hãy thêm key và thời hạn.'}),201
+    image_url=str(d.get('image_url','')).strip()
+    # Keep images embedded in SQLite; only accept data URLs or ordinary HTTPS URLs.
+    if image_url and not (image_url.startswith('data:image/') or image_url.startswith('https://')):
+        return jsonify({'error':'Ảnh phải là ảnh tải lên hoặc đường dẫn HTTPS.'}),400
+    if len(image_url)>2_500_000:return jsonify({'error':'Ảnh quá lớn. Hãy chọn ảnh nhỏ hơn 1 MB.'}),400
+    if not name or not image_url:return jsonify({'error':'Vui lòng nhập tên và ảnh sản phẩm.'}),400
+    with connect() as c: cur=c.execute('INSERT INTO store_products(name,price,image_url,created_at) VALUES(?,?,?,?)',(name,0,image_url,now()))
+    return jsonify({'ok':True,'id':cur.lastrowid,'message':'Đã thêm sản phẩm vào cửa hàng. Bạn có thể thêm giá, key hoặc xóa ở danh sách bên dưới.'}),201
 
 @app.post("/api/admin/products/<int:product_id>/keys")
-def admin_add_keys():
+def admin_add_keys(product_id):
     u,error=admin_required()
     if error:return error
     d=request.get_json(silent=True) or {}; raw=str(d.get('keys','')); keys=[x.strip() for x in raw.splitlines() if x.strip()]
@@ -227,7 +234,7 @@ def admin_add_keys():
     return jsonify({'ok':True,'added':added,'submitted':len(keys),'message':f'Đã thêm {added} key cho gói {duration} {"ngày" if unit=="day" else "giờ"}.'})
 
 @app.patch("/api/admin/products/<int:product_id>")
-def admin_edit_product():
+def admin_edit_product(product_id):
     u,error=admin_required()
     if error:return error
     d=request.get_json(silent=True) or {}; name=str(d.get('name','')).strip()[:100]
@@ -238,7 +245,7 @@ def admin_edit_product():
     return jsonify({'ok':True,'message':'Đã cập nhật sản phẩm.'})
 
 @app.delete("/api/admin/products/<int:product_id>")
-def admin_delete_product():
+def admin_delete_product(product_id):
     u,error=admin_required()
     if error:return error
     with connect() as c:
